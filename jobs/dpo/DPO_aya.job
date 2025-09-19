@@ -1,0 +1,160 @@
+#!/bin/bash
+#SBATCH --job-name=DPO_Aya
+#SBATCH --mem=720G
+#SBATCH --cpus-per-task=16
+#SBATCH --time=03:00:00
+#SBATCH --partition=gpu_h100
+#SBATCH --gres=gpu:1
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --output=%x_%j.out
+
+
+# Load necessary modules
+module load 2024
+module load CUDA/12.6.0
+module load cuDNN/9.5.0.50-CUDA-12.6.0
+
+# --- Script Configuration ---
+
+# --- Essential Environment Variables ---
+# These must be set before running the script.
+# - HUGGING_FACE_ACCESS_TOKEN: For downloading gated models from Hugging Face.
+# - WANDB_TOKEN: For logging training metrics to Weights & Biases.
+# - PROJECT_DIR: The root directory of the project.
+# - CACHE_DIR: A designated directory for caching models, datasets, etc.
+# - SINGULARITY_IMAGE_PATH: Path to the singularity image.
+
+# Check for undefined environment variables
+if [ -z "$HUGGING_FACE_ACCESS_TOKEN" ] || [ -z "$WANDB_TOKEN" ] || [ -z "$PROJECT_DIR" ] || [ -z "$CACHE_DIR" ] || [ -z "$SINGULARITY_IMAGE_PATH" ]; then
+    echo "Error: One or more required environment variables are not set."
+    echo "Please set HUGGING_FACE_ACCESS_TOKEN, WANDB_TOKEN, PROJECT_DIR, CACHE_DIR, and SINGULARITY_IMAGE_PATH."
+    exit 1
+fi
+
+# --- Path Definitions ---
+# These paths are derived from the environment variables.
+
+# Path to the OpenRLHF repository
+OPENRLHF_DIR="${PROJECT_DIR}/OpenRLHF"
+
+# Path to the DPO dataset
+DATASET_PATH="${PROJECT_DIR}/data/preprocessed/DPO_multilingual_C_2_Tasks/DPO_multilingual_dataset.json"
+
+# Hugging Face cache directories
+HF_HOME="${CACHE_DIR}/.cache/huggingface"
+HF_DATASETS_CACHE="${HF_HOME}/datasets"
+
+# Path for saving DPO checkpoints
+SAVE_PATH="${PROJECT_DIR}/checkpoints/aya-23-8B-DPO-C99_2_Tasks"
+
+# Path for pip user packages
+PIP_USER_DIR="${CACHE_DIR}/.local"
+
+# Model to be trained
+PRETRAINED_MODEL="CohereLabs/aya-23-8B"
+
+# --- End Script Configuration ---
+
+# Ensure critical directories exist
+mkdir -p "${OPENRLHF_DIR}"
+mkdir -p "$(dirname "${SINGULARITY_IMAGE_PATH}")"
+mkdir -p "$(dirname "${DATASET_PATH}")"
+mkdir -p "${HF_HOME}"
+mkdir -p "${HF_DATASETS_CACHE}"
+mkdir -p "${SAVE_PATH}"
+mkdir -p "${PIP_USER_DIR}"
+
+echo "================================================================================"
+echo "Job Configuration:"
+echo "Project Directory: ${PROJECT_DIR}"
+echo "OpenRLHF Directory: ${OPENRLHF_DIR}"
+echo "Singularity Image: ${SINGULARITY_IMAGE_PATH}"
+echo "Dataset: ${DATASET_PATH}"
+echo "Cache Directory: ${CACHE_DIR}"
+echo "Save Path: ${SAVE_PATH}"
+echo "Pretrained Model: ${PRETRAINED_MODEL}"
+echo "================================================================================"
+
+# Check if essential files and directories exist
+if [ ! -f "${SINGULARITY_IMAGE_PATH}" ]; then
+    echo "ERROR: Singularity image not found at ${SINGULARITY_IMAGE_PATH}"
+    exit 1
+fi
+
+if [ ! -d "${OPENRLHF_DIR}" ]; then
+    echo "ERROR: OpenRLHF directory not found at ${OPENRLHF_DIR}"
+    exit 1
+fi
+
+if [ ! -f "${DATASET_PATH}" ]; then
+    echo "ERROR: Dataset file not found at ${DATASET_PATH}"
+    exit 1
+fi
+
+# Execute the training job within the Singularity container
+singularity exec --nv \
+    --env LD_LIBRARY_PATH="/usr/local/cuda/compat/lib:${LD_LIBRARY_PATH}" \
+    --bind "${PROJECT_DIR}:${PROJECT_DIR}" \
+    --bind "${CACHE_DIR}:${CACHE_DIR}" \
+    "${SINGULARITY_IMAGE_PATH}" \
+    bash -lc "\
+        echo '===== INSIDE SINGULARITY CONTAINER ====='
+
+        # Set up a clean Python environment
+        unset PYTHONPATH
+        export PYTHONUSERBASE=\"${PIP_USER_DIR}\" 
+        export PATH=\"${PIP_USER_DIR}/bin:/usr/local/bin:/usr/bin:/bin\" 
+        mkdir -p \"${PIP_USER_DIR}/bin\"
+
+        # Symlink CUDA library for Triton
+        mkdir -p \"${PIP_USER_DIR}/lib\"
+        if [ -f '/usr/local/cuda/compat/lib/libcuda.so.1' ]; then
+            ln -sf /usr/local/cuda/compat/lib/libcuda.so.1 \"${PIP_USER_DIR}/lib/libcuda.so\"
+        else
+            echo 'WARNING: libcuda.so.1 not found. Triton might fail.'
+        fi
+
+        # Install necessary packages
+        pip install --user openrlhf vllm \"click<9\"
+
+        # Set environment variables for the container
+        export LD_LIBRARY_PATH=\"${PIP_USER_DIR}/lib:/usr/local/cuda/compat/lib:/.singularity.d/libs:	extvariable{LD_LIBRARY_PATH}\" 
+        export CUDA_HOME=\"/usr/local/cuda\"
+        export TRITON_LIBCUDA_PATH=\"/usr/local/cuda/compat/lib/libcuda.so.1\"
+        export HF_HOME=\"${HF_HOME}\" 
+        export HF_DATASETS_CACHE=\"${HF_DATASETS_CACHE}\" 
+        export HF_TOKEN=\"${HUGGING_FACE_ACCESS_TOKEN}\" 
+        mkdir -p \$HF_HOME
+        mkdir -p \$HF_DATASETS_CACHE
+
+        # Log in to Weights & Biases
+        wandb login \"${WANDB_TOKEN}\" 
+
+        # Change to the OpenRLHF project directory
+        cd \"${OPENRLHF_DIR}\" 
+
+        echo '===== STARTING DPO TRAINING ====='
+        deepspeed --module openrlhf.cli.train_dpo \
+            --pretrain \"${PRETRAINED_MODEL}\" \
+            --ref_offload \
+            --dataset \"${DATASET_PATH}\" \
+            --chosen_key chosen \
+            --rejected_key rejected \
+            --apply_chat_template \
+            --save_path \"${SAVE_PATH}\" \
+            --save_steps -1 \
+            --logging_steps 5 \
+            --eval_steps -1 \
+            --train_batch_size 128 \
+            --micro_train_batch_size 1 \
+            --bf16 \
+            --max_epochs 1 \
+            --max_len 4096 \
+            --zero_stage 3 \
+            --learning_rate 5e-6 \
+            --beta 0.1 \
+            --flash_attn \
+            --gradient_checkpointing \
+            --use_wandb \"${WANDB_TOKEN}\" 
+    
