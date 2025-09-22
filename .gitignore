@@ -1,0 +1,15 @@
+data/aya
+data/chatbot_arena
+data/gutenberg_dpo
+data/math_step_dpo
+data/tasksource
+data/wmt24pp
+data/helpsteer2
+data/aya_evaluation_suite
+
+translation_cost.txt
+evaluation/evaluations_data/judge_cost_report.txt
+
+**/__pycache__/
+
+translators/comet_models_test_hf_direct/

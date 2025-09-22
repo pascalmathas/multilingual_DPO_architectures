@@ -1,0 +1,39 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=setup_vllm_env
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=02:00:00
+#SBATCH --output=%x_%j.out
+
+
+# Clear any loaded modules
+module purge
+
+# Set up Conda
+export PATH="$HOME/miniconda3/bin:$PATH"
+eval "$(conda shell.bash hook)"
+
+# Activate the vllm environment
+conda activate vllm
+
+echo "================================================================================"
+echo "Environment Setup:"
+echo "Conda Environment: $CONDA_DEFAULT_ENV"
+echo "Python Version: $(python --version)"
+echo "Python Path: $(which python)"
+echo "================================================================================"
+
+# Verify PyTorch and GPU access
+echo "--- Checking PyTorch GPU Access ---"
+srun python -uc "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available? {torch.cuda.is_available()}'); print(f'CUDA version built with: {torch.version.cuda}'); print(f'Device name: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \'N/A\'}'"
+echo "---------------------------------"
+
+# Install necessary packages
+echo "--- Installing Packages ---"
+pip install pandas tqdm torch vllm
+echo "----------------------------"
+
+echo "Environment setup complete."
